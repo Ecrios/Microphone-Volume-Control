@@ -15,6 +15,8 @@ global progressCtrl := ""
 global isGuiVisible := false
 global deviceList := []
 global micMenu := ""
+global fadeTimer := 0
+global lastVolumeChangeTime := 0
 
 ; Загрузка сохраненных настроек из INI-файла
 LoadSettings()
@@ -43,12 +45,35 @@ IsInCorner() {
 
 global cornerSize := 15 ; Размер чувствительной зоны угла (в пикселях)
 
-; --- Горячие клавиши (активны только в выбранном углу) ---
+; --- Горячие клавиши в углу экрана ---
 #HotIf IsInCorner()
 WheelUp::AdjustVolume(volStep)
 WheelDown::AdjustVolume(-volStep)
 MButton::ToggleMute()
 #HotIf
+
+; --- ГЛОБАЛЬНЫЕ ГОРЯЧИЕ КЛАВИШИ (СТРОГО ПРАВЫЙ ALT) ---
+
+; Установка точной громкости (Right Alt + 1..0)
+RAlt & 1::SetDirectVolume(10)
+RAlt & 2::SetDirectVolume(20)
+RAlt & 3::SetDirectVolume(30)
+RAlt & 4::SetDirectVolume(40)
+RAlt & 5::SetDirectVolume(50)
+RAlt & 6::SetDirectVolume(60)
+RAlt & 7::SetDirectVolume(70)
+RAlt & 8::SetDirectVolume(80)
+RAlt & 9::SetDirectVolume(90)
+RAlt & 0::SetDirectVolume(100)
+
+; Плавное изменение за 1.5 секунды (Виртуальные коды нижнего ряда)
+; vkBC = Кома (,) / Буква Б
+; vkBE = Точка (.) / Буква Ю
+; vkBF = Слэш (/) / Точка (.) в русс. раскладке
+RAlt & vkBC::FadeToVolume(10, 1000)
+RAlt & vkBE::FadeToVolume(25, 1000)
+RAlt & vkBF::FadeToVolume(75, 1000)
+
 
 ; --- Чтение и сохранение настроек (INI-файл) ---
 LoadSettings() {
@@ -117,15 +142,66 @@ SetMicMute(status) {
 }
 
 AdjustVolume(step) {
+    StopFade()
     current := GetMicVolume()
     SetMicVolume(current + step)
     UpdateOSD()
 }
 
+SetDirectVolume(targetVol) {
+    StopFade()
+    SetMicVolume(targetVol)
+    UpdateOSD()
+}
+
 ToggleMute() {
+    StopFade()
     currentMute := GetMicMute()
     SetMicMute(!currentMute)
     UpdateOSD()
+}
+
+; --- Функция плавного угасания/нарастания громкости ---
+FadeToVolume(targetVol, durationMs := 1500) {
+    global fadeTimer
+    StopFade()
+    
+    startVol := GetMicVolume()
+    if (startVol == targetVol) {
+        UpdateOSD()
+        return
+    }
+    
+    startTime := A_TickCount
+    
+    fadeStep() {
+        global fadeTimer
+        elapsed := A_TickCount - startTime
+        
+        if (elapsed >= durationMs) {
+            SetMicVolume(targetVol)
+            UpdateOSD()
+            StopFade()
+            return
+        }
+        
+        ; Линейная интерполяция громкости
+        progress := elapsed / durationMs
+        current := startVol + (targetVol - startVol) * progress
+        SetMicVolume(Round(current))
+        UpdateOSD()
+    }
+    
+    fadeTimer := fadeStep
+    SetTimer(fadeTimer, 30) ; Обновление каждые 30 мс
+}
+
+StopFade() {
+    global fadeTimer
+    if (fadeTimer) {
+        SetTimer(fadeTimer, 0)
+        fadeTimer := 0
+    }
 }
 
 ; --- Создание и обновление OSD ---
@@ -134,23 +210,20 @@ CreateOSD() {
     
     oGui := Gui("+AlwaysOnTop -Caption +ToolWindow +E0x08000000")
     oGui.BackColor := "1A1A1A"
-    oGui.MarginX := 0  ; Отключаем автоматический правый системный отступ AHK
+    oGui.MarginX := 0
     oGui.MarginY := 12
     
-    ; Заголовок точно во всю ширину окна (300px)
     oGui.SetFont("s10 cWhite Bold", "Segoe UI")
     textCtrl := oGui.AddText("x0 w300 Center", "Микрофон: 100%")
     
-    ; Прогресс-бар: отступ слева 20px, ширина 260px (остается ровно 20px справа)
     progressCtrl := oGui.AddProgress("x20 w260 h12 Background333333 c00FF00", 50)
     
-    ; Шкала точно под прогресс-баром (x20 w260)
     oGui.SetFont("s8 cGray", "Consolas")
     oGui.AddText("x20 w260 Left -Wrap", "0   10  20  30  40  50  60  70  80  90  100")
 }
 
 UpdateOSD() {
-    global oGui, textCtrl, progressCtrl, isGuiVisible
+    global oGui, textCtrl, progressCtrl, isGuiVisible, lastVolumeChangeTime
     
     vol := GetMicVolume()
     muted := GetMicMute()
@@ -165,10 +238,11 @@ UpdateOSD() {
         progressCtrl.Opt("+c00FF00")
     }
     
+    lastVolumeChangeTime := A_TickCount
+    
     if (!isGuiVisible) {
         gx := (A_ScreenWidth - 300) / 2
         gy := A_ScreenHeight - 160
-        ; Фиксируем точную ширину w300 для идеальной симметрии отступов
         oGui.Show("w300 x" . gx . " y" . gy . " NoActivate")
         isGuiVisible := true
         SetTimer(CheckMousePosition, 100)
@@ -176,8 +250,13 @@ UpdateOSD() {
 }
 
 CheckMousePosition() {
-    global isGuiVisible, oGui
-    if (!IsInCorner()) {
+    global isGuiVisible, oGui, lastVolumeChangeTime, fadeTimer
+    
+    inCorner := IsInCorner()
+    fadeActive := (fadeTimer != 0)
+    recentChange := (A_TickCount - lastVolumeChangeTime < 1500)
+    
+    if (!inCorner && !fadeActive && !recentChange) {
         oGui.Hide()
         isGuiVisible := false
         SetTimer(CheckMousePosition, 0)
