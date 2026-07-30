@@ -2,11 +2,12 @@
 #SingleInstance Force
 Persistent
 
-; --- Глобальные переменные ---
+; --- Глобальные переменные (Инициализируются сразу) ---
 global iniPath := A_ScriptDir "\settings.ini"
 global volStep := 10               ; Шаг по умолчанию
 global activeCorner := "Top-Right" ; Угол по умолчанию
 global selectedDevice := "Auto"    ; Устройство по умолчанию
+global cornerSize := 15            ; Размер чувствительной зоны угла (в пикселях)
 
 ; --- Переменные состояния ---
 global oGui := ""
@@ -18,6 +19,9 @@ global micMenu := ""
 global fadeTimer := 0
 global lastVolumeChangeTime := 0
 
+; --- Добавлена задержка для корректной инициализации на старте Windows ---
+Sleep 3000 
+
 ; Загрузка сохраненных настроек из INI-файла
 LoadSettings()
 
@@ -27,6 +31,9 @@ SetupTrayMenu()
 
 ; --- Проверка положения мыши ---
 IsInCorner() {
+    if (!IsSet(activeCorner) || !IsSet(cornerSize))
+        return false
+
     CoordMode "Mouse", "Screen"
     MouseGetPos &mx, &my
     sw := A_ScreenWidth
@@ -42,8 +49,6 @@ IsInCorner() {
         return (mx >= sw - cornerSize && my >= sh - cornerSize)
     return false
 }
-
-global cornerSize := 15 ; Размер чувствительной зоны угла (в пикселях)
 
 ; --- Горячие клавиши в углу экрана ---
 #HotIf IsInCorner()
@@ -67,9 +72,6 @@ RAlt & 9::SetDirectVolume(90)
 RAlt & 0::SetDirectVolume(100)
 
 ; Плавное изменение за 1.5 секунды (Виртуальные коды нижнего ряда)
-; vkBC = Кома (,) / Буква Б
-; vkBE = Точка (.) / Буква Ю
-; vkBF = Слэш (/) / Точка (.) в русс. раскладке
 RAlt & vkBC::FadeToVolume(10, 1000)
 RAlt & vkBE::FadeToVolume(25, 1000)
 RAlt & vkBF::FadeToVolume(75, 1000)
@@ -185,7 +187,6 @@ FadeToVolume(targetVol, durationMs := 1500) {
             return
         }
         
-        ; Линейная интерполяция громкости
         progress := elapsed / durationMs
         current := startVol + (targetVol - startVol) * progress
         SetMicVolume(Round(current))
@@ -193,7 +194,7 @@ FadeToVolume(targetVol, durationMs := 1500) {
     }
     
     fadeTimer := fadeStep
-    SetTimer(fadeTimer, 30) ; Обновление каждые 30 мс
+    SetTimer(fadeTimer, 30)
 }
 
 StopFade() {
@@ -225,6 +226,10 @@ CreateOSD() {
 UpdateOSD() {
     global oGui, textCtrl, progressCtrl, isGuiVisible, lastVolumeChangeTime
     
+    ; Защита от преждевременного вызова до создания GUI
+    if (!IsObject(textCtrl) || !IsObject(progressCtrl))
+        return
+        
     vol := GetMicVolume()
     muted := GetMicMute()
     
@@ -240,7 +245,7 @@ UpdateOSD() {
     
     lastVolumeChangeTime := A_TickCount
     
-    if (!isGuiVisible) {
+    if (!isGuiVisible && IsObject(oGui)) {
         gx := (A_ScreenWidth - 300) / 2
         gy := A_ScreenHeight - 160
         oGui.Show("w300 x" . gx . " y" . gy . " NoActivate")
@@ -251,6 +256,12 @@ UpdateOSD() {
 
 CheckMousePosition() {
     global isGuiVisible, oGui, lastVolumeChangeTime, fadeTimer
+    
+    ; Защита от преждевременного вызова до создания GUI
+    if (!IsObject(oGui)) {
+        SetTimer(CheckMousePosition, 0)
+        return
+    }
     
     inCorner := IsInCorner()
     fadeActive := (fadeTimer != 0)
@@ -267,13 +278,11 @@ CheckMousePosition() {
 SetupTrayMenu() {
     A_TrayMenu.Delete()
     
-    ; Подменю выбора микрофона
     BuildMicrophoneMenu()
     A_TrayMenu.Add("Выбор микрофона", micMenu)
     
-    A_TrayMenu.Add() ; Разделитель
+    A_TrayMenu.Add()
     
-    ; Подменю выбора угла
     global cornerMenu := Menu()
     global cornerItems := Map(
         "Top-Left", "Верхний левый",
@@ -288,7 +297,6 @@ SetupTrayMenu() {
     }
     A_TrayMenu.Add("Активный угол", cornerMenu)
     
-    ; Подменю выбора шага
     global stepMenu := Menu()
     global stepOptions := [5, 10, 20, 30, 40, 50]
     for step in stepOptions {
@@ -307,14 +315,12 @@ BuildMicrophoneMenu() {
     micMenu := Menu()
     deviceList := []
     
-    ; Пункт автоматического выбора
     micMenu.Add("Автоматически (По умолчанию)", (*) => SelectMicrophone("Auto"))
     if (selectedDevice == "Auto")
         micMenu.Check("Автоматически (По умолчанию)")
         
-    micMenu.Add() ; Разделитель
+    micMenu.Add()
     
-    ; Сканирование аудиоустройств системы
     Loop 30 {
         try {
             devName := SoundGetName(, A_Index)
@@ -350,9 +356,9 @@ MenuSelectMic(devName, itemName, itemPos, menuObj) {
 SelectMicrophone(devName) {
     global selectedDevice
     selectedDevice := devName
-    SaveSettings()  ; Сохранение в файл
-    SetupTrayMenu() ; Обновление галочек в меню
-    UpdateOSD()     ; Обновление индикатора
+    SaveSettings()
+    SetupTrayMenu()
+    UpdateOSD()
 }
 
 MenuSelectCorner(cornerName, itemName, itemPos, menuObj) {
@@ -362,7 +368,7 @@ MenuSelectCorner(cornerName, itemName, itemPos, menuObj) {
     }
     activeCorner := cornerName
     cornerMenu.Check(cornerItems[cornerName])
-    SaveSettings()  ; Сохранение в файл
+    SaveSettings()
 }
 
 MenuSelectStep(stepValue, itemName, itemPos, menuObj) {
@@ -372,7 +378,7 @@ MenuSelectStep(stepValue, itemName, itemPos, menuObj) {
     }
     volStep := stepValue
     stepMenu.Check(stepValue . "%")
-    SaveSettings()  ; Сохранение в файл
+    SaveSettings()
 }
 
 ; Инициализация состояния при старте
